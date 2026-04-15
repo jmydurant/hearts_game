@@ -15,6 +15,8 @@
 
 项目仓库：<https://github.com/jmydurant/hearts_game>
 
+开发记录见：[DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)
+
 ## 当前状态
 
 这是一个已经可玩的原型，不是完成版。
