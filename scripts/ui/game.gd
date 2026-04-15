@@ -4,8 +4,10 @@ const HeartsMatch = preload("res://scripts/core/hearts_match.gd")
 const HeartsUtil = preload("res://scripts/core/hearts_util.gd")
 
 const BASE_SIZE := Vector2(640, 360)
-const RENDER_SCALE := 3.0
 const MIN_RENDER_SIZE := Vector2i(1920, 1080)
+const MIN_RENDER_SCALE := 3
+const MAX_COMFORTABLE_SCALE := 4
+const MAX_FULLSCREEN_SCALE := 3
 const LAYOUT_SCALE := 2.0
 const FOCUS_HAND := 0
 const FOCUS_ACTIONS := 1
@@ -42,13 +44,14 @@ var show_pause_dialog := false
 var pause_choice := 0
 var _automation_running := false
 var resolution_supported := true
+var render_scale := MIN_RENDER_SCALE
 
 
 func _ready() -> void:
 	_parse_runtime_flags()
 	_load_fonts()
 	_configure_window()
-	_refresh_canvas_transform()
+	_refresh_canvas_transform("init", true)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if not resolution_supported:
@@ -60,6 +63,12 @@ func _ready() -> void:
 	game_match.round_resolved.connect(_on_round_resolved)
 	game_match.match_finished.connect(_on_match_finished)
 	game_match.start_match(seed_override)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_SIZE_CHANGED:
+		_refresh_canvas_transform()
+		queue_redraw()
 
 
 func _parse_runtime_flags() -> void:
@@ -136,10 +145,22 @@ func _configure_window() -> void:
 	DisplayServer.window_set_title("终端红心大战 - 需要至少 1920x1080")
 
 
-func _refresh_canvas_transform() -> void:
-	scale = Vector2(RENDER_SCALE, RENDER_SCALE)
-	var canvas_size := BASE_SIZE * RENDER_SCALE
-	position = (Vector2(MIN_RENDER_SIZE) - canvas_size) * 0.5
+func _refresh_canvas_transform(reason := "", should_log := false) -> void:
+	var layout_size := _get_layout_size()
+	var scale_x := int(floor(layout_size.x / BASE_SIZE.x))
+	var scale_y := int(floor(layout_size.y / BASE_SIZE.y))
+	var fitted_scale: int = min(scale_x, scale_y)
+	var max_scale := MAX_FULLSCREEN_SCALE if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN else MAX_COMFORTABLE_SCALE
+	render_scale = clamp(fitted_scale, MIN_RENDER_SCALE, max_scale)
+	scale = Vector2(render_scale, render_scale)
+	var canvas_size := BASE_SIZE * render_scale
+	position = (layout_size - canvas_size) * 0.5
+	if should_log:
+		_log_resolution_state(reason, layout_size, canvas_size)
+
+
+func _get_layout_size() -> Vector2:
+	return get_viewport_rect().size
 
 
 func _on_state_changed() -> void:
@@ -363,6 +384,30 @@ func _toggle_fullscreen() -> void:
 		_configure_window()
 	else:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+	call_deferred("_refresh_after_mode_toggle")
+
+
+func _refresh_after_mode_toggle() -> void:
+	_refresh_canvas_transform("toggle", true)
+
+
+func _log_resolution_state(reason: String, layout_size: Vector2, canvas_size: Vector2) -> void:
+	var mode := "fullscreen" if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN else "windowed"
+	var window_size := get_window().size
+	var screen_size := DisplayServer.screen_get_size()
+	print("[Resolution][%s] mode=%s window=%sx%s screen=%sx%s viewport=%sx%s canvas=%sx%s scale=%s" % [
+		reason,
+		mode,
+		window_size.x,
+		window_size.y,
+		screen_size.x,
+		screen_size.y,
+		int(layout_size.x),
+		int(layout_size.y),
+		int(canvas_size.x),
+		int(canvas_size.y),
+		render_scale,
+	])
 
 
 func _draw() -> void:
