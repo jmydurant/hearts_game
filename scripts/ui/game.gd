@@ -6,11 +6,16 @@ const HandCard = preload("res://scripts/ui/hand_card.gd")
 const HandActionButton = preload("res://scripts/ui/hand_action_button.gd")
 
 const BASE_SIZE := Vector2(640, 360)
-const MIN_RENDER_SIZE := Vector2i(1920, 1080)
+const MIN_SUPPORTED_SCALE := 2
+const PREFERRED_RENDER_SCALE := 3
 const MIN_RENDER_SCALE := 3
-const MAX_COMFORTABLE_SCALE := 4
-const MAX_FULLSCREEN_SCALE := 3
 const LAYOUT_SCALE := 2.0
+const DISPLAY_MODE_WINDOWED := 0
+const DISPLAY_MODE_MAXIMIZED := 1
+const DISPLAY_MODE_FULLSCREEN := 2
+const DISPLAY_MODE_LABELS := ["窗口化", "最大化", "全屏"]
+const PAUSE_FOCUS_DISPLAY := 0
+const PAUSE_FOCUS_ACTIONS := 1
 const FOCUS_HAND := 0
 const FOCUS_ACTIONS := 1
 const PANEL_BG := Color("0f1716")
@@ -43,10 +48,13 @@ var action_index := 0
 var pass_selected_keys: Array[String] = []
 var toast_text := ""
 var show_pause_dialog := false
-var pause_choice := 0
+var pause_focus_zone := PAUSE_FOCUS_ACTIONS
+var pause_action_index := 0
 var _automation_running := false
 var resolution_supported := true
 var render_scale := MIN_RENDER_SCALE
+var windowed_restore_size := Vector2i.ZERO
+var last_non_fullscreen_mode := DISPLAY_MODE_WINDOWED
 var hand_card_layer: Control
 var hand_card_nodes: Array = []
 var hand_action_nodes: Array = []
@@ -73,7 +81,12 @@ func _ready() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_SIZE_CHANGED:
+		_update_dynamic_viewport_base(_get_target_display_size())
 		_refresh_canvas_transform()
+		if resolution_supported and DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_WINDOWED:
+			windowed_restore_size = get_window().size
+		if DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN:
+			last_non_fullscreen_mode = _current_display_mode_id()
 		queue_redraw()
 
 
@@ -139,16 +152,31 @@ func _build_system_font(font_names: Array[String]) -> Font:
 
 
 func _configure_window() -> void:
-	var screen_size := DisplayServer.screen_get_size()
-	resolution_supported = screen_size.x >= MIN_RENDER_SIZE.x and screen_size.y >= MIN_RENDER_SIZE.y
+	var available_size: Vector2i = DisplayServer.screen_get_usable_rect().size
+	var available_scale: int = _get_fitted_scale_for_size(available_size)
+	resolution_supported = available_scale >= MIN_SUPPORTED_SCALE
 	if resolution_supported:
-		get_window().size = MIN_RENDER_SIZE
-		get_window().min_size = MIN_RENDER_SIZE
+		var launch_scale: int = min(PREFERRED_RENDER_SCALE, available_scale)
+		var launch_size: Vector2i = _get_layout_size_for_scale(launch_scale)
+		windowed_restore_size = launch_size
+		get_window().size = launch_size
+		get_window().min_size = _get_layout_size_for_scale(MIN_SUPPORTED_SCALE)
+		if _should_launch_maximized(available_scale):
+			last_non_fullscreen_mode = DISPLAY_MODE_MAXIMIZED
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
+		else:
+			last_non_fullscreen_mode = DISPLAY_MODE_WINDOWED
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		_update_dynamic_viewport_base(_get_target_display_size())
 		DisplayServer.window_set_title("终端红心大战")
 		return
-	get_window().size = screen_size
-	get_window().min_size = screen_size
-	DisplayServer.window_set_title("终端红心大战 - 需要至少 1920x1080")
+	windowed_restore_size = available_size
+	get_window().size = available_size
+	get_window().min_size = available_size
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	last_non_fullscreen_mode = DISPLAY_MODE_WINDOWED
+	_update_dynamic_viewport_base(available_size)
+	DisplayServer.window_set_title("终端红心大战 - 需要至少 1280x720")
 
 
 func _ensure_hand_card_layer() -> void:
@@ -164,11 +192,9 @@ func _ensure_hand_card_layer() -> void:
 
 func _refresh_canvas_transform(reason := "", should_log := false) -> void:
 	var layout_size := _get_layout_size()
-	var scale_x := int(floor(layout_size.x / BASE_SIZE.x))
-	var scale_y := int(floor(layout_size.y / BASE_SIZE.y))
-	var fitted_scale: int = min(scale_x, scale_y)
-	var max_scale := MAX_FULLSCREEN_SCALE if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN else MAX_COMFORTABLE_SCALE
-	render_scale = clamp(fitted_scale, MIN_RENDER_SCALE, max_scale)
+	var fitted_scale := _get_fitted_scale_for_size(Vector2i(layout_size))
+	var min_scale := MIN_SUPPORTED_SCALE if resolution_supported else 1
+	render_scale = max(fitted_scale, min_scale)
 	scale = Vector2(render_scale, render_scale)
 	var canvas_size := BASE_SIZE * render_scale
 	position = (layout_size - canvas_size) * 0.5
@@ -177,6 +203,8 @@ func _refresh_canvas_transform(reason := "", should_log := false) -> void:
 
 
 func _get_layout_size() -> Vector2:
+	if get_window().content_scale_size != Vector2i.ZERO:
+		return Vector2(get_window().content_scale_size)
 	return get_viewport_rect().size
 
 
@@ -219,7 +247,8 @@ func _handle_key_input(keycode: int) -> bool:
 		return true
 	if keycode == KEY_ESCAPE:
 		show_pause_dialog = not show_pause_dialog
-		pause_choice = 0
+		pause_focus_zone = PAUSE_FOCUS_ACTIONS
+		pause_action_index = 0
 		queue_redraw()
 		return true
 	if show_pause_dialog:
@@ -244,12 +273,30 @@ func _handle_key_input(keycode: int) -> bool:
 
 
 func _handle_pause_input(keycode: int) -> void:
-	if keycode == KEY_LEFT or keycode == KEY_RIGHT:
-		pause_choice = 1 - pause_choice
+	if keycode == KEY_LEFT:
+		if pause_focus_zone == PAUSE_FOCUS_DISPLAY:
+			_cycle_display_mode(-1)
+		else:
+			pause_action_index = max(0, pause_action_index - 1)
+		queue_redraw()
+		return
+	if keycode == KEY_RIGHT:
+		if pause_focus_zone == PAUSE_FOCUS_DISPLAY:
+			_cycle_display_mode(1)
+		else:
+			pause_action_index = min(1, pause_action_index + 1)
+		queue_redraw()
+		return
+	if keycode == KEY_UP or keycode == KEY_DOWN:
+		pause_focus_zone = 1 - pause_focus_zone
 		queue_redraw()
 		return
 	if keycode == KEY_ENTER or keycode == KEY_KP_ENTER:
-		if pause_choice == 0:
+		if pause_focus_zone == PAUSE_FOCUS_DISPLAY:
+			_cycle_display_mode(1)
+			queue_redraw()
+			return
+		if pause_action_index == 0:
 			show_pause_dialog = false
 			queue_redraw()
 		else:
@@ -396,15 +443,14 @@ func _sync_selection() -> void:
 
 
 func _toggle_fullscreen() -> void:
-	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-		_configure_window()
+	if _current_display_mode_id() == DISPLAY_MODE_FULLSCREEN:
+		_apply_display_mode(last_non_fullscreen_mode)
 	else:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-	call_deferred("_refresh_after_mode_toggle")
+		_apply_display_mode(DISPLAY_MODE_FULLSCREEN)
 
 
 func _refresh_after_mode_toggle() -> void:
+	_update_dynamic_viewport_base(_get_target_display_size())
 	_refresh_canvas_transform("toggle", true)
 
 
@@ -412,15 +458,21 @@ func _log_resolution_state(reason: String, layout_size: Vector2, canvas_size: Ve
 	var mode := "fullscreen" if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN else "windowed"
 	var window_size := get_window().size
 	var screen_size := DisplayServer.screen_get_size()
-	print("[Resolution][%s] mode=%s window=%sx%s screen=%sx%s viewport=%sx%s canvas=%sx%s scale=%s" % [
+	var usable_size := DisplayServer.screen_get_usable_rect().size
+	var content_size := get_window().content_scale_size
+	print("[Resolution][%s] mode=%s window=%sx%s screen=%sx%s usable=%sx%s viewport=%sx%s content=%sx%s canvas=%sx%s scale=%s" % [
 		reason,
 		mode,
 		window_size.x,
 		window_size.y,
 		screen_size.x,
 		screen_size.y,
+		usable_size.x,
+		usable_size.y,
 		int(layout_size.x),
 		int(layout_size.y),
+		content_size.x,
+		content_size.y,
 		int(canvas_size.x),
 		int(canvas_size.y),
 		render_scale,
@@ -626,24 +678,34 @@ func _draw_match_overlay(state: Dictionary) -> void:
 
 
 func _draw_pause_dialog() -> void:
-	var rect := _r(84, 58, 152, 64)
+	var rect := _r(62, 48, 196, 86)
 	_draw_modal(rect, "暂停")
-	_draw_text("继续还是退出？", rect.position + _v(10, 26), TEXT_COLOR, 12, true)
+	_draw_text("显示模式", rect.position + _v(10, 24), TEXT_COLOR, 12, true)
+	var display_mode := _current_display_mode_id()
+	for index in range(DISPLAY_MODE_LABELS.size()):
+		var button := Rect2(rect.position.x + _s(10) + index * _s(58), rect.position.y + _s(30), _s(50), _s(14))
+		var selected := display_mode == index
+		var focused := pause_focus_zone == PAUSE_FOCUS_DISPLAY and selected
+		draw_rect(button, GOLD_COLOR if selected else PANEL_ALT, true)
+		draw_rect(button, TEXT_COLOR if focused else PANEL_LINE, false, 1.0)
+		_draw_text(DISPLAY_MODE_LABELS[index], button.position + _v(5, 9), PANEL_BG if selected else TEXT_COLOR, 8, true)
+	_draw_text("继续还是退出？", rect.position + _v(10, 56), TEXT_COLOR, 12, true)
 	var labels := ["继续", "退出"]
 	for index in range(labels.size()):
-		var button := Rect2(rect.position.x + _s(16) + index * _s(60), rect.position.y + _s(38), _s(44), _s(14))
-		var active := pause_choice == index
+		var button := Rect2(rect.position.x + _s(34) + index * _s(68), rect.position.y + _s(62), _s(52), _s(14))
+		var active := pause_focus_zone == PAUSE_FOCUS_ACTIONS and pause_action_index == index
 		draw_rect(button, GOLD_COLOR if active else PANEL_ALT, true)
 		draw_rect(button, TEXT_COLOR if active else PANEL_LINE, false, 1.0)
-		_draw_text(labels[index], button.position + _v(10, 9), PANEL_BG if active else TEXT_COLOR, 8, true)
+		_draw_text(labels[index], button.position + _v(12, 9), PANEL_BG if active else TEXT_COLOR, 8, true)
+	_draw_text("上下切换，左右调整，回车确认。", rect.position + _v(10, 80), MUTED_COLOR, 8, true)
 
 
 func _draw_unsupported_overlay() -> void:
 	var rect := _r(48, 52, 224, 76)
 	_draw_modal(rect, "分辨率不支持")
-	_draw_text("当前显示器低于 1920x1080。", rect.position + _v(10, 26), TEXT_COLOR, 12, true)
-	_draw_text("本版本不再提供低分屏回退。", rect.position + _v(10, 38), TEXT_COLOR, 8, true)
-	_draw_text("请在 1080p 或更高分辨率运行。", rect.position + _v(10, 49), GOLD_COLOR, 8, true)
+	_draw_text("当前可用区域低于 1280x720。", rect.position + _v(10, 26), TEXT_COLOR, 12, true)
+	_draw_text("项目至少需要 2x 整数缩放。", rect.position + _v(10, 38), TEXT_COLOR, 8, true)
+	_draw_text("1080p 推荐，720p 可运行。", rect.position + _v(10, 49), GOLD_COLOR, 8, true)
 	_draw_text("按 Enter 或 Esc 退出", rect.position + _v(10, 64), MUTED_COLOR, 8, true)
 
 
@@ -694,6 +756,70 @@ func _card_suit_color(card: Dictionary) -> Color:
 			return CLUB_COLOR
 		_:
 			return TEXT_COLOR
+
+
+func _get_fitted_scale_for_size(size: Vector2i) -> int:
+	var scale_x := int(floor(float(size.x) / BASE_SIZE.x))
+	var scale_y := int(floor(float(size.y) / BASE_SIZE.y))
+	return min(scale_x, scale_y)
+
+
+func _get_layout_size_for_scale(scale_factor: int) -> Vector2i:
+	return Vector2i(int(BASE_SIZE.x) * scale_factor, int(BASE_SIZE.y) * scale_factor)
+
+
+func _get_target_display_size() -> Vector2i:
+	if get_window().size != Vector2i.ZERO:
+		return get_window().size
+	return DisplayServer.screen_get_usable_rect().size
+
+
+func _update_dynamic_viewport_base(target_size: Vector2i) -> void:
+	if target_size == Vector2i.ZERO:
+		return
+	var fitted_scale: int = _get_fitted_scale_for_size(target_size)
+	var minimum_scale: int = MIN_SUPPORTED_SCALE if resolution_supported else 1
+	var viewport_scale: int = max(fitted_scale, minimum_scale)
+	var content_size: Vector2i = _get_layout_size_for_scale(viewport_scale)
+	var root: Window = get_window()
+	root.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
+	root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_KEEP
+	root.content_scale_stretch = Window.CONTENT_SCALE_STRETCH_INTEGER
+	root.content_scale_size = content_size
+
+
+func _current_display_mode_id() -> int:
+	var window_mode := DisplayServer.window_get_mode()
+	if window_mode == DisplayServer.WINDOW_MODE_MAXIMIZED:
+		return DISPLAY_MODE_MAXIMIZED
+	if window_mode == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		return DISPLAY_MODE_FULLSCREEN
+	return DISPLAY_MODE_WINDOWED
+
+
+func _cycle_display_mode(step: int) -> void:
+	var next_mode := wrapi(_current_display_mode_id() + step, 0, DISPLAY_MODE_LABELS.size())
+	_apply_display_mode(next_mode)
+
+
+func _apply_display_mode(display_mode: int) -> void:
+	match display_mode:
+		DISPLAY_MODE_WINDOWED:
+			last_non_fullscreen_mode = DISPLAY_MODE_WINDOWED
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			if windowed_restore_size != Vector2i.ZERO:
+				get_window().size = windowed_restore_size
+		DISPLAY_MODE_MAXIMIZED:
+			last_non_fullscreen_mode = DISPLAY_MODE_MAXIMIZED
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
+		DISPLAY_MODE_FULLSCREEN:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+	toast_text = "显示模式：%s。" % DISPLAY_MODE_LABELS[display_mode]
+	call_deferred("_refresh_after_mode_toggle")
+
+
+func _should_launch_maximized(available_scale: int) -> bool:
+	return OS.get_name() == "macOS" and available_scale < PREFERRED_RENDER_SCALE
 
 
 func _s(value: float) -> float:
