@@ -96,10 +96,14 @@ func _load_fonts() -> void:
 
 
 func _load_pixel_font(resource_path: String) -> FontFile:
-	var pixel_font := FontFile.new()
-	var load_error := pixel_font.load_dynamic_font(ProjectSettings.globalize_path(resource_path))
-	if load_error != OK:
-		return null
+	var pixel_font := load(resource_path) as FontFile
+	if pixel_font != null:
+		pixel_font = pixel_font.duplicate()
+	else:
+		pixel_font = FontFile.new()
+		var load_error := pixel_font.load_dynamic_font(ProjectSettings.globalize_path(resource_path))
+		if load_error != OK:
+			return null
 	pixel_font.antialiasing = TextServer.FONT_ANTIALIASING_NONE
 	pixel_font.hinting = TextServer.HINTING_NONE
 	pixel_font.subpixel_positioning = TextServer.SUBPIXEL_POSITIONING_DISABLED
