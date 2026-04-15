@@ -2,6 +2,8 @@ extends Control
 
 const HeartsMatch = preload("res://scripts/core/hearts_match.gd")
 const HeartsUtil = preload("res://scripts/core/hearts_util.gd")
+const HandCard = preload("res://scripts/ui/hand_card.gd")
+const HandActionButton = preload("res://scripts/ui/hand_action_button.gd")
 
 const BASE_SIZE := Vector2(640, 360)
 const MIN_RENDER_SIZE := Vector2i(1920, 1080)
@@ -45,6 +47,9 @@ var pause_choice := 0
 var _automation_running := false
 var resolution_supported := true
 var render_scale := MIN_RENDER_SCALE
+var hand_card_layer: Control
+var hand_card_nodes: Array = []
+var hand_action_nodes: Array = []
 
 
 func _ready() -> void:
@@ -53,7 +58,8 @@ func _ready() -> void:
 	_configure_window()
 	_refresh_canvas_transform("init", true)
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mouse_filter = Control.MOUSE_FILTER_PASS
+	_ensure_hand_card_layer()
 	if not resolution_supported:
 		queue_redraw()
 		return
@@ -143,6 +149,17 @@ func _configure_window() -> void:
 	get_window().size = screen_size
 	get_window().min_size = screen_size
 	DisplayServer.window_set_title("终端红心大战 - 需要至少 1920x1080")
+
+
+func _ensure_hand_card_layer() -> void:
+	if hand_card_layer != null:
+		return
+	hand_card_layer = Control.new()
+	hand_card_layer.name = "HandCardLayer"
+	hand_card_layer.position = Vector2.ZERO
+	hand_card_layer.size = BASE_SIZE
+	hand_card_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(hand_card_layer)
 
 
 func _refresh_canvas_transform(reason := "", should_log := false) -> void:
@@ -413,12 +430,15 @@ func _log_resolution_state(reason: String, layout_size: Vector2, canvas_size: Ve
 func _draw() -> void:
 	_draw_background()
 	if not resolution_supported:
+		_set_hand_cards_visible(false)
 		_draw_unsupported_overlay()
 		return
 	var state := game_match.get_state()
 	var table_rect := _r(8, 8, 228, 116)
 	var sidebar_rect := _r(244, 8, 68, 164)
 	var hand_rect := _r(8, 128, 228, 44)
+	_sync_hand_card_nodes(state, hand_rect)
+	_sync_hand_action_nodes(state, hand_rect)
 	_draw_panel(table_rect, "牌桌")
 	_draw_panel(sidebar_rect, "终端面板")
 	_draw_panel(hand_rect, "你的手牌")
@@ -524,40 +544,8 @@ func _draw_hand(state: Dictionary, rect: Rect2) -> void:
 	var hand := _human_hand(state)
 	if hand.is_empty():
 		_draw_text("当前没有手牌。", rect.position + _v(8, 22), MUTED_COLOR, 12, true)
-		return
-	var player_turn := int(state["phase"]) == HeartsMatch.Phase.TRICK_PLAY and int(state["current_player"]) == 0
-	var controls_enabled := int(state["phase"]) == HeartsMatch.Phase.PASSING or player_turn
-	var card_width := _s(14)
-	var card_height := _s(22)
-	var usable_width := rect.size.x - _s(22) - card_width
-	var step := 0.0
-	if hand.size() > 1:
-		step = min(_s(16), usable_width / float(hand.size() - 1))
-	var start_x := rect.position.x + _s(10)
-	for index in range(hand.size()):
-		var card: Dictionary = hand[index]
-		var selected := pass_selected_keys.has(HeartsUtil.card_key(card))
-		var hovered := index == hand_cursor and controls_enabled
-		var lift := 0.0
-		if selected:
-			lift += _s(4)
-		if hovered:
-			lift += _s(6)
-		var card_rect := Rect2(start_x + step * index, rect.position.y + _s(16) - lift, card_width, card_height)
-		var legal := true
-		if int(state["phase"]) == HeartsMatch.Phase.PASSING:
-			legal = true
-		elif player_turn:
-			legal = HeartsUtil.contains_card(state.get("legal_moves", []), card)
-		_draw_card(card_rect, card, hovered, false, selected, legal)
-	var action_rect := _r(rect.position.x / LAYOUT_SCALE + 158, rect.position.y / LAYOUT_SCALE + 4, 66, 10)
-	var labels := _action_labels(state)
-	for index in range(labels.size()):
-		var label_rect := Rect2(action_rect.position.x + index * _s(28), action_rect.position.y, _s(26), action_rect.size.y)
-		var active := focus_zone == FOCUS_ACTIONS and action_index == index and controls_enabled
-		draw_rect(label_rect, GOLD_COLOR if active else PANEL_ALT, true)
-		draw_rect(label_rect, TEXT_COLOR if active else PANEL_LINE, false, 1.0)
-		_draw_text(labels[index], label_rect.position + _v(3, 7), PANEL_BG if active else TEXT_COLOR, 8, true)
+	else:
+		_draw_text("鼠标悬停可选牌，点击可操作。", rect.position + _v(8, 12), MUTED_COLOR, 8, true)
 
 
 func _draw_card(rect: Rect2, card: Dictionary, cursor := false, winning := false, selected := false, legal := true) -> void:
@@ -587,10 +575,10 @@ func _draw_status_line(state: Dictionary) -> void:
 	var hint := ""
 	match int(state["phase"]):
 		HeartsMatch.Phase.PASSING:
-			hint = "左右移动，回车选牌，上下切换到确认。"
+			hint = "左右移动或鼠标选牌，回车确认，上下切换到确认。"
 		HeartsMatch.Phase.TRICK_PLAY:
 			if int(state["current_player"]) == 0:
-				hint = "选择要出的牌并按回车。"
+				hint = "选择要出的牌，按回车或直接点击。"
 			else:
 				hint = "%s 思考中..." % state["player_labels"][state["current_player"]]
 		HeartsMatch.Phase.TRICK_RESOLVE:
@@ -727,3 +715,194 @@ func _draw_text(text: String, position: Vector2, color: Color, size := 8, mono :
 		return
 	var pixel_size := 12 if use_title_font else 8
 	draw_string(font, position, text, HORIZONTAL_ALIGNMENT_LEFT, -1.0, pixel_size, color)
+
+
+func _sync_hand_card_nodes(state: Dictionary, rect: Rect2) -> void:
+	if hand_card_layer == null:
+		return
+	if not _should_show_hand_cards(state):
+		_set_hand_cards_visible(false)
+		return
+	hand_card_layer.visible = true
+	var hand := _human_hand(state)
+	_resize_hand_card_nodes(hand.size())
+	var player_turn := int(state["phase"]) == HeartsMatch.Phase.TRICK_PLAY and int(state["current_player"]) == 0
+	var controls_enabled := _hand_cards_interactable(state)
+	var card_width := _s(14)
+	var card_height := _s(22)
+	var usable_width := rect.size.x - _s(22) - card_width
+	var step := 0.0
+	if hand.size() > 1:
+		step = min(_s(16), usable_width / float(hand.size() - 1))
+	var start_x := rect.position.x + _s(10)
+	for index in range(hand.size()):
+		var card: Dictionary = hand[index]
+		var selected := pass_selected_keys.has(HeartsUtil.card_key(card))
+		var hovered := index == hand_cursor and controls_enabled
+		var lift := 0.0
+		if selected:
+			lift += _s(4)
+		if hovered:
+			lift += _s(6)
+		var card_rect := Rect2(start_x + step * index, rect.position.y + _s(16) - lift, card_width, card_height)
+		var legal := true
+		if int(state["phase"]) == HeartsMatch.Phase.PASSING:
+			legal = true
+		elif player_turn:
+			legal = HeartsUtil.contains_card(state.get("legal_moves", []), card)
+		var card_node = hand_card_nodes[index]
+		card_node.configure({
+			"card_index": index,
+			"card": HeartsUtil.clone_card(card),
+			"ascii_mode": ascii_mode,
+			"cursor": hovered,
+			"selected": selected,
+			"legal": legal,
+			"suit_color": _card_suit_color(card),
+			"mono_font": mono_font,
+			"position": card_rect.position,
+			"size": card_rect.size,
+			"z_index": index,
+			"visible": true,
+			"interactable": controls_enabled,
+		})
+	for index in range(hand.size(), hand_card_nodes.size()):
+		hand_card_nodes[index].visible = false
+		hand_card_nodes[index].mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+
+func _resize_hand_card_nodes(required: int) -> void:
+	while hand_card_nodes.size() < required:
+		var card_node = HandCard.new()
+		card_node.hovered.connect(_on_hand_card_hovered)
+		card_node.clicked.connect(_on_hand_card_clicked)
+		hand_card_nodes.append(card_node)
+		hand_card_layer.add_child(card_node)
+
+
+func _set_hand_cards_visible(is_visible: bool) -> void:
+	if hand_card_layer != null:
+		hand_card_layer.visible = is_visible
+	for card_node in hand_card_nodes:
+		card_node.visible = is_visible
+		card_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for button_node in hand_action_nodes:
+		button_node.visible = is_visible
+		button_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+
+func _should_show_hand_cards(state: Dictionary) -> bool:
+	if show_pause_dialog:
+		return false
+	var phase := int(state["phase"])
+	return phase != HeartsMatch.Phase.ROUND_END and phase != HeartsMatch.Phase.MATCH_END
+
+
+func _hand_cards_interactable(state: Dictionary) -> bool:
+	if not _should_show_hand_cards(state):
+		return false
+	if int(state["phase"]) == HeartsMatch.Phase.PASSING:
+		return true
+	return int(state["phase"]) == HeartsMatch.Phase.TRICK_PLAY and int(state["current_player"]) == 0
+
+
+func _on_hand_card_hovered(card_index: int) -> void:
+	if game_match == null:
+		return
+	var state := game_match.get_state()
+	if not _hand_cards_interactable(state):
+		return
+	if hand_cursor == card_index and focus_zone == FOCUS_HAND:
+		return
+	hand_cursor = card_index
+	focus_zone = FOCUS_HAND
+	queue_redraw()
+
+
+func _on_hand_card_clicked(card_index: int) -> void:
+	if game_match == null:
+		return
+	var state := game_match.get_state()
+	if not _hand_cards_interactable(state):
+		return
+	hand_cursor = card_index
+	focus_zone = FOCUS_HAND
+	if int(state["phase"]) == HeartsMatch.Phase.PASSING:
+		_toggle_pass_card(state)
+	elif int(state["phase"]) == HeartsMatch.Phase.TRICK_PLAY and int(state["current_player"]) == 0:
+		_play_selected_card(state)
+	queue_redraw()
+
+
+func _sync_hand_action_nodes(state: Dictionary, rect: Rect2) -> void:
+	if hand_card_layer == null:
+		return
+	if not _should_show_hand_cards(state):
+		_set_hand_cards_visible(false)
+		return
+	var labels := _action_labels(state)
+	_resize_hand_action_nodes(labels.size())
+	var controls_enabled := _hand_cards_interactable(state)
+	var action_rect := _r(rect.position.x / LAYOUT_SCALE + 158, rect.position.y / LAYOUT_SCALE + 4, 66, 10)
+	for index in range(labels.size()):
+		var label_rect := Rect2(action_rect.position.x + index * _s(28), action_rect.position.y, _s(26), action_rect.size.y)
+		var active := focus_zone == FOCUS_ACTIONS and action_index == index and controls_enabled
+		var button_node = hand_action_nodes[index]
+		button_node.configure({
+			"button_index": index,
+			"label": labels[index],
+			"active": active,
+			"interactable": controls_enabled,
+			"mono_font": mono_font,
+			"position": label_rect.position,
+			"size": label_rect.size,
+			"visible": true,
+		})
+	for index in range(labels.size(), hand_action_nodes.size()):
+		hand_action_nodes[index].visible = false
+		hand_action_nodes[index].mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+
+func _resize_hand_action_nodes(required: int) -> void:
+	while hand_action_nodes.size() < required:
+		var button_node = HandActionButton.new()
+		button_node.hovered.connect(_on_hand_action_hovered)
+		button_node.clicked.connect(_on_hand_action_clicked)
+		hand_action_nodes.append(button_node)
+		hand_card_layer.add_child(button_node)
+
+
+func _on_hand_action_hovered(button_index: int) -> void:
+	if game_match == null:
+		return
+	var state := game_match.get_state()
+	if not _hand_cards_interactable(state):
+		return
+	if action_index == button_index and focus_zone == FOCUS_ACTIONS:
+		return
+	action_index = button_index
+	focus_zone = FOCUS_ACTIONS
+	queue_redraw()
+
+
+func _on_hand_action_clicked(button_index: int) -> void:
+	if game_match == null:
+		return
+	var state := game_match.get_state()
+	if not _hand_cards_interactable(state):
+		return
+	action_index = button_index
+	focus_zone = FOCUS_ACTIONS
+	_activate_hand_action(state, button_index)
+	queue_redraw()
+
+
+func _activate_hand_action(state: Dictionary, button_index: int) -> void:
+	if int(state["phase"]) == HeartsMatch.Phase.PASSING:
+		if button_index == 0:
+			_toggle_pass_card(state)
+		else:
+			_confirm_pass(state)
+		return
+	if int(state["phase"]) == HeartsMatch.Phase.TRICK_PLAY and int(state["current_player"]) == 0:
+		_play_selected_card(state)
